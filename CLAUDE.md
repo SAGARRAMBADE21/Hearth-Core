@@ -12,8 +12,9 @@
 
 - Layout mirrors xo-space (`../xo-space`, reference only — never copy it wholesale):
   `routers/hearth_agent/` (thin APIRouters) → `services/hearth_agent/` (agent-specific logic) and
-  top-level `services/<name>/` for anything not specific to running an agent (`services/apidiff/`,
-  `services/storage/`).
+  top-level `services/<name>/` for shared space-level pieces (`services/storage/`).
+- The API diff engine is its own root-level package, `apidiff/` (`from apidiff import ...`), not under
+  `services/`. CLI: `python -m apidiff.cli OLD NEW`.
 - Keep route handlers thin; logic lives in services.
 - Every external command runs through `utils/commands` (`run` over an argv list, `safe_arg` for untrusted
   values). No `shell=True`, no command strings.
@@ -35,6 +36,12 @@
   tool call. Edits outside the Impact Report scope, CI config, secrets and `.git/` are denied; network
   tools, `git push/remote/fetch`, `gh`, `sudo` are denied.
 - `finish` is accepted only after `HarnessHooks.validate_candidate()` passes.
+- Remote Control (`adapters/claude_code/remote_control.py`) stays off unless an operator sets
+  `remote_control.enabled: true` in `config/agents/claude_code/capabilities.json`: it lets claude.ai drive a
+  Claude Code session in the space outside the sandbox and policy. `start()` refuses (route: 403) otherwise.
+- The adapter package mirrors xo-space's `claude_code/` module for module. Modules that do not fit HEARTH
+  (`session_telemetry`, `visualizer_source`) keep the contract and report `supported: False`; `agents` serves
+  the one built-in migrator and answers 405 to create/patch/delete.
 - The GitHub token lives only in gh's store (`gh auth login --with-token`). `token.json` holds metadata.
   Never write a token into a remote URL, a sandbox, a log, an error message, or a JSON file. Every gh call
   runs without `GH_TOKEN`/`GITHUB_TOKEN` (`gh_api.STORE_BYPASS_ENV`), so gh's store is the only credential.

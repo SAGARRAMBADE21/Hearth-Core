@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from services.apidiff.model import ApiSurface, ApiSymbol, Param, SymbolKind
+from apidiff.model import ApiSurface, ApiSymbol, Param, SymbolKind
 
 HTTP_METHODS = ("get", "put", "post", "delete", "options", "head", "patch", "trace")
 

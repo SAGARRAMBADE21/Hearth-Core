@@ -25,6 +25,8 @@ from fastapi import FastAPI
 load_dotenv()
 
 from routers.hearth_agent import all_routers  # noqa: E402
+from routers.status import all_routers as status_routers  # noqa: E402
+from services.hearth_agent.adapters.loader import try_load_capability  # noqa: E402
 from services.hearth_agent.registry.agent_registry import get_active_agent  # noqa: E402
 
 log = logging.getLogger("hearth_core")
@@ -49,12 +51,19 @@ async def lifespan(app: FastAPI):
     agent = get_active_agent()
     log.info("Hearth-Core starting: agent=%s model=%s", agent.name, agent.model_default)
     _run_agent_setup()
-    yield
+    telemetry = try_load_capability("session_telemetry")
+    if telemetry is not None:
+        telemetry.start_daemon()
+    try:
+        yield
+    finally:
+        if telemetry is not None:
+            telemetry.stop_daemon()
 
 
 app = FastAPI(title="Hearth-Core", version="0.1.0", lifespan=lifespan)
 
-for _r in all_routers:
+for _r in [*status_routers, *all_routers]:
     app.include_router(_r)
 
 

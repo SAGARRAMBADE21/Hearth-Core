@@ -18,7 +18,8 @@
   "model": {
     "default": "claude-opus-5-5",
     "env": "HEARTH_MODEL",
-    "effort": "xhigh"
+    "effort": "xhigh",
+    "allowed": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"]
   },
   "mcp": {
     "format": "sdk",

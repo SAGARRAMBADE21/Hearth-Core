@@ -132,6 +132,7 @@ class JobSpec(BaseModel):
     allowed_paths: list[str] = Field(default_factory=list)  # globs; default = impact files + tests
     limits: JobLimits = Field(default_factory=JobLimits)
     revise_instructions: str | None = None  # from `/hearth revise <...>`
+    resume_job_id: str | None = None  # the earlier job on this branch whose agent session a revise continues
 
 
 class Usage(BaseModel):

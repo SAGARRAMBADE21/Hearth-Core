@@ -7,4 +7,8 @@ select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501"]  # long lines are allowed where a split would hurt readability
 
 [lint.isort]
-known-first-party = ["services", "routers", "utils"]
+known-first-party = ["apidiff", "services", "routers", "utils"]
+
+[lint.flake8-bugbear]
+# FastAPI declares parameters with call defaults (Body(), Query(), Depends()); they are evaluated once by design.
+extend-immutable-calls = ["fastapi.Body", "fastapi.Query", "fastapi.Depends", "fastapi.Header"]

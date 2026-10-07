@@ -1,10 +1,8 @@
 """
 HEARTH's domain tools, served to Claude Code from an in-process MCP server.
 
-The counterpart of xo-space's ``mcp_config.py`` (which writes a per-session MCP
-config pointing at the Composio proxy). Here the server runs inside the adapter
-process via ``create_sdk_mcp_server``, so there is no config file to write or
-clean up. Tool names come from ``manifest.json`` → ``mcp.tools``.
+``mcp_config.py`` wraps these tools in the session's in-process MCP server.
+Tool names are listed in ``manifest.json`` → ``mcp.tools``.
 
 ``finish`` is gated: it is accepted only when the harness's independent
 validation passes (TDD §3 items 3-4), at most ``limits.max_validation_rounds``.
@@ -16,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
+from claude_agent_sdk import SdkMcpTool, tool
 
 from services.hearth_agent.adapters.base import HarnessHooks
 from services.hearth_agent.adapters.claude_code.prompts import build_fixup_message
@@ -24,7 +22,6 @@ from services.hearth_agent.engine import stream_events as se
 from services.hearth_agent.models import JobSpec, ValidationResult
 
 Emit = Callable[[dict], Awaitable[None]]
-DEFAULT_SERVER_NAME = "hearth"
 
 
 @dataclass
@@ -89,6 +86,3 @@ def build_domain_tools(job: JobSpec, hooks: HarnessHooks, state: JobState, emit:
 
     return [get_change_record, get_impact_report, run_validation, finish]
 
-
-def build_server(tools: list[SdkMcpTool], server_name: str = DEFAULT_SERVER_NAME):
-    return create_sdk_mcp_server(server_name, tools=tools)

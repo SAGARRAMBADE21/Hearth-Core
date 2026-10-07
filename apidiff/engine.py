@@ -6,7 +6,7 @@ import hashlib
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from services.apidiff.model import ApiChange, ApiSurface, ApiSymbol, ChangeType, SymbolKind
+from apidiff.model import ApiChange, ApiSurface, ApiSymbol, ChangeType, SymbolKind
 from services.hearth_agent.models import ChangeKind, ChangeRecord, ChangeSource, PackageRef, Severity, SymbolChange
 
 RENAME_THRESHOLD = 0.72
@@ -113,9 +113,9 @@ def diff_surfaces(old: ApiSurface, new: ApiSurface, *, detect_renames: bool = Tr
 
 def extract_surface(path: str | Path, language: str | None = None) -> ApiSurface:
     """Pick an extractor by ``language`` or by file suffix / directory contents."""
-    from services.apidiff.openapi import extract_openapi
-    from services.apidiff.python_api import extract_python_module, extract_python_package
-    from services.apidiff.typescript_api import extract_typescript, extract_typescript_dir
+    from apidiff.openapi import extract_openapi
+    from apidiff.python_api import extract_python_module, extract_python_package
+    from apidiff.typescript_api import extract_typescript, extract_typescript_dir
 
     p = Path(path)
     lang = language

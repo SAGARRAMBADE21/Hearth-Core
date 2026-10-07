@@ -63,6 +63,67 @@ def parse_message(msg: Any) -> list[dict]:
     return []
 
 
+def _block_activity(block: dict, *, partial: bool) -> dict | None:
+    """The activity a non-text content block stands for, as a label only."""
+    btype = block.get("type")
+    if btype == "thinking":
+        return se.activity(se.THINKING, partial=partial)
+    if btype == "tool_use":
+        return se.running(block.get("name") or "", partial=partial)
+    return None
+
+
+def parse_stream_line(raw: bytes) -> dict | None:
+    """Decode one raw line of ``claude --output-format stream-json`` output into a normalised event.
+
+    xo-space's parser, kept for reading the CLI's raw output (e.g. a transcript or a
+    CLI run outside the SDK). HEARTH's adapter itself uses :func:`parse_message`.
+    """
+    try:
+        line = raw.decode("utf-8").strip()
+    except (UnicodeDecodeError, AttributeError):
+        return None
+    if not line:
+        return None
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    etype = event.get("type", "")
+
+    if etype == "system" and event.get("subtype") == "init":
+        sid = event.get("session_id") or event.get("sessionId")
+        return se.session_id(sid) if sid else None
+    if etype == "stream_event":
+        inner = event.get("event") or {}
+        if inner.get("type") == "content_block_delta":
+            delta = inner.get("delta") or {}
+            if delta.get("type") == "text_delta" and delta.get("text"):
+                return se.token(delta["text"], partial=True)
+            return None
+        if inner.get("type") == "content_block_start":
+            return _block_activity(inner.get("content_block") or {}, partial=True)
+        return None
+    if etype == "assistant":
+        blocks = (event.get("message") or {}).get("content", [])
+        parts = [b.get("text", "") for b in blocks if b.get("type") == "text" and b.get("text")]
+        if parts:
+            return se.token("".join(parts))
+        for block in blocks:
+            act = _block_activity(block, partial=False)
+            if act is not None:
+                return act
+        return None
+    if etype == "result":
+        if event.get("is_error"):
+            return se.error(event.get("result", "Claude Code error"))
+        return se.result(result=event.get("result", ""), session_id=event.get("session_id"),
+                         usage=event.get("usage") or {}, model=event.get("model", ""))
+    if etype == "error":
+        return se.error(event.get("error", event.get("message", "unknown error")))
+    return None
+
+
 def trim_output(value: Any, limit: int = 4000) -> str:
     text = value if isinstance(value, str) else json.dumps(value, default=str)
     return text if len(text) <= limit else text[:limit] + f"... [{len(text) - limit} chars trimmed]"

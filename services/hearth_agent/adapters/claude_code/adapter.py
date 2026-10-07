@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,14 +12,11 @@ from typing import Any
 
 from services.hearth_agent.adapters.base import BaseAgentAdapter, HarnessHooks
 from services.hearth_agent.adapters.claude_code.hooks import build_hooks, deny_prompts
-from services.hearth_agent.adapters.claude_code.mcp_tools import (
-    DEFAULT_SERVER_NAME,
-    JobState,
-    build_domain_tools,
-    build_server,
-)
+from services.hearth_agent.adapters.claude_code.mcp_config import server_name, session_mcp_servers
+from services.hearth_agent.adapters.claude_code.mcp_tools import JobState
 from services.hearth_agent.adapters.claude_code.prompts import MIGRATOR_RULES, build_task_message
 from services.hearth_agent.adapters.claude_code.streaming import parse_message
+from services.hearth_agent.engine import sessions_io as _session_index
 from services.hearth_agent.engine import stream_events as se
 from services.hearth_agent.models import AgentResult, JobSpec, Usage
 
@@ -28,6 +26,121 @@ log = logging.getLogger(__name__)
 _DEFAULT_MODEL = "claude-opus-5-5"
 _DEFAULT_TOOLS = ["Read", "Edit", "Write", "Glob", "Grep", "Bash"]
 _DEFAULT_DISALLOWED = ["WebFetch", "WebSearch", "Task"]
+_BACKEND = "claude_code"
+
+
+# ── Session index (ported from xo-space; one row per job) ─────────────────────
+# xo-space keys rows by a chat session key and stores them per project; HEARTH
+# keys them by job id under the state root (engine/sessions_io). The native
+# session id is pre-allocated and written BEFORE the CLI starts, so the transcript
+# file name is known from t=0 and a cancelled job can't orphan the mapping.
+
+_native_map: dict[str, str] = {}
+
+
+def make_session_key(job_id: str) -> str:
+    return job_id
+
+
+def find_session_id_by_key(session_key: str) -> str | None:
+    row = _session_index.read_session_row(session_key)
+    return row.get("sessionId") if row else None
+
+
+def get_native_session_id(session_key: str) -> str | None:
+    cached = _native_map.get(session_key)
+    if cached:
+        return cached
+    row = _session_index.read_session_row(session_key)
+    native = (row or {}).get("nativeSessionId")
+    if native:
+        _native_map[session_key] = native
+        return native
+    return None
+
+
+def get_session_directory(session_key: str) -> str | None:
+    row = _session_index.read_session_row(session_key)
+    return row.get("directory") if row else None
+
+
+def find_session_key_for_session_id(session_id: str) -> str | None:
+    """Index key whose ``sessionId`` or ``nativeSessionId`` is ``session_id``."""
+    for key, row in _session_index.iter_session_rows():
+        if session_id in (row.get("sessionId"), row.get("nativeSessionId")):
+            if row.get("nativeSessionId"):
+                _native_map[key] = row["nativeSessionId"]
+            return key
+    return None
+
+
+def write_preliminary_entry(
+    session_key: str,
+    session_id: str,
+    cwd: str,
+    native_session_id: str = "",
+    *,
+    model: str | None = None,
+    resumed_from: str | None = None,
+) -> None:
+    """Write the job's index row before the CLI starts. Messages are not stored here;
+    they live in the CLI's own transcript."""
+    now = _session_index.now_ms()
+    row = {
+        "sessionId": session_id,
+        "jobId": session_id,
+        "nativeSessionId": native_session_id,
+        "directory": cwd,
+        "directoryHistory": [{"directory": cwd, "selectedAt": now}],
+        "backend": _BACKEND,
+        "model": model,
+        "resumedFrom": resumed_from,
+        "status": "running",
+        "createdAt": now,
+        "updatedAt": now,
+        "usage": _session_index.empty_usage(),
+        "costUsd": None,
+        "numTurns": None,
+    }
+    _session_index.write_session_row(session_key, row)
+    if native_session_id:
+        _native_map[session_key] = native_session_id
+
+
+def _patch_native_session_id(session_key: str, native_sid: str) -> bool:
+    """Write ``nativeSessionId`` into the row the moment it is first seen. Idempotent; never clobbers
+    a different id already recorded."""
+    if not session_key or not native_sid:
+        return False
+    row = _session_index.read_session_row(session_key)
+    if not row:
+        return False
+    existing = row.get("nativeSessionId") or ""
+    if existing == native_sid:
+        _native_map[session_key] = native_sid
+        return True
+    if existing:
+        return False
+    row["nativeSessionId"] = native_sid
+    row["updatedAt"] = _session_index.now_ms()
+    _session_index.write_session_row(session_key, row)
+    _native_map[session_key] = native_sid
+    return True
+
+
+def _roll_up(session_key: str, native_sid: str | None, raw_usage: dict, cost: float | None,
+             num_turns: int | None, status: str) -> None:
+    """Record the job's final usage, cost and status on its row (runs even when the job was cut short)."""
+    row = _session_index.read_session_row(session_key)
+    if not row:
+        return
+    if native_sid and not row.get("nativeSessionId"):
+        row["nativeSessionId"] = native_sid
+    usage = row.get("usage") or _session_index.empty_usage()
+    for key in usage:
+        usage[key] = int(usage.get(key, 0)) + int(raw_usage.get(key, 0) or 0)
+    row.update(usage=usage, costUsd=cost, numTurns=num_turns, status=status, updatedAt=_session_index.now_ms())
+    _session_index.write_session_row(session_key, row)
 
 
 # ── Adapter class ──────────────────────────────────────────────────────────────
@@ -67,7 +180,7 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     @property
     def _mcp_server(self) -> str:
-        return (self.commands.get("mcp") or {}).get("server_name") or DEFAULT_SERVER_NAME
+        return server_name(self.commands)
 
     def _model(self, job: JobSpec) -> str:
         model_cfg = self.commands.get("model") or {}
@@ -138,7 +251,21 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
     # ── SDK options ────────────────────────────────────────────────────────────
 
-    def build_options(self, job: JobSpec, workspace: Path, hooks: HarnessHooks, state: JobState, emit):
+    def _transcript_available(self, native_session_id: str, workspace: Path) -> bool:
+        """Whether the CLI can resume ``native_session_id`` from ``workspace`` (its transcript is under that cwd)."""
+        from claude_agent_sdk import get_session_info
+
+        try:
+            return get_session_info(native_session_id, directory=str(workspace)) is not None
+        except Exception:
+            return False
+
+    def build_options(
+        self, job: JobSpec, workspace: Path, hooks: HarnessHooks, state: JobState, emit,
+        *, session_id: str | None = None, resume: str | None = None,
+    ):
+        """SDK options for one job. ``session_id`` pre-allocates the native id; ``resume`` forks a prior
+        session (``/hearth revise``) into that new id, leaving the earlier transcript untouched."""
         from claude_agent_sdk import ClaudeAgentOptions
 
         tools = list(self._flags.get("tools") or _DEFAULT_TOOLS)
@@ -151,7 +278,10 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             tools=tools,
             allowed_tools=[*tools, f"mcp__{server}__*"],
             disallowed_tools=list(self._flags.get("disallowed_tools") or _DEFAULT_DISALLOWED),
-            mcp_servers={server: build_server(build_domain_tools(job, hooks, state, emit), server)},
+            mcp_servers=session_mcp_servers(job, hooks, state, emit, manifest=self.commands),
+            session_id=session_id,
+            resume=resume,
+            fork_session=bool(resume),
             hooks=build_hooks(workspace, hooks.policy, state, emit, mcp_server=server),
             can_use_tool=deny_prompts,
             permission_mode=self._flags.get("permission_mode", "default"),
@@ -170,12 +300,31 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
         queue: asyncio.Queue[dict | None] = asyncio.Queue()
         state = JobState()
         usage = Usage()
+        raw_usage: dict = {}
         native_session_id: str | None = None
 
         async def emit(event: dict) -> None:
             await queue.put(event)
 
-        options = self.build_options(job, workspace, hooks, state, emit)
+        # Session index: resume the earlier job's session when its transcript is reachable from this
+        # workspace (the Sandbox Runner reuses the branch's fix workspace for a revise); otherwise start fresh.
+        key = make_session_key(job.job_id)
+        resume_native: str | None = None
+        resume_note: str | None = None
+        if job.resume_job_id:
+            previous = get_native_session_id(make_session_key(job.resume_job_id))
+            if previous and self._transcript_available(previous, workspace):
+                resume_native = previous
+                resume_note = f"forked from {job.resume_job_id}"
+            else:
+                resume_note = f"fresh session: {job.resume_job_id}'s transcript is not reachable from this workspace"
+                log.info("job %s: %s", job.job_id, resume_note)
+        pre_allocated = str(uuid.uuid4())
+        write_preliminary_entry(key, job.job_id, str(workspace), pre_allocated, model=self._model(job),
+                                resumed_from=job.resume_job_id if resume_native else None)
+
+        options = self.build_options(job, workspace, hooks, state, emit,
+                                     session_id=pre_allocated, resume=resume_native)
 
         async def prompts():
             yield {"type": "user", "message": {"role": "user", "content": build_task_message(job)}}
@@ -189,8 +338,12 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
                     for event in parse_message(msg):
                         if event["type"] == se.SESSION_ID:
                             native_session_id = event["session_id"]
+                            # Persist at once, so a cancelled job still maps to its transcript.
+                            _patch_native_session_id(key, native_session_id)
                         elif event["type"] == se.RESULT:
                             u = event.get("usage") or {}
+                            raw_usage.clear()
+                            raw_usage.update(u)
                             usage.input_tokens = int(u.get("input_tokens", 0)) + int(u.get("cache_read_input_tokens", 0))
                             usage.output_tokens = int(u.get("output_tokens", 0))
                             usage.cost_usd = event.get("total_cost_usd")
@@ -210,23 +363,28 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
 
         task = asyncio.create_task(produce())
         timed_out = False
+        completed = False  # False only when the caller stopped consuming the stream early
         try:
             async with asyncio.timeout(job.limits.wall_clock_seconds):
                 while (event := await queue.get()) is not None:
                     yield event
+            completed = True
         except TimeoutError:
-            timed_out = True
+            timed_out = completed = True
         finally:
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-
-        if state.finished:
-            status = "passed"
-        elif timed_out or (usage.steps >= job.limits.max_steps and not state.out_of_rounds):
-            status = "budget_exhausted"
-        else:
-            status = "failed_fix"
+            if state.finished:
+                status = "passed"
+            elif timed_out or (usage.steps >= job.limits.max_steps and not state.out_of_rounds):
+                status = "budget_exhausted"
+            elif completed:
+                status = "failed_fix"
+            else:
+                status = "cancelled"
+            # Always roll usage up onto the index row, even when the caller stopped early.
+            _roll_up(key, native_session_id, raw_usage, usage.cost_usd, usage.steps or None, status)
         result = AgentResult(
             job_id=job.job_id,
             intelligence=self.adapter_name,
@@ -237,7 +395,8 @@ class ClaudeCodeAdapter(BaseAgentAdapter):
             usage=usage,
             native_session_id=native_session_id,
             finished_at=datetime.now(UTC),
-            extra={"policy_violations": state.policy_violations, "validation_rounds": state.validation_rounds},
+            extra={"policy_violations": state.policy_violations, "validation_rounds": state.validation_rounds,
+                   **({"session": resume_note} if resume_note else {})},
         )
         yield se.done(native_session_id, result.model_dump(mode="json"))
 

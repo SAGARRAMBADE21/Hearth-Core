@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from services.apidiff import (
+from apidiff import (
     diff_surfaces,
     extract_openapi,
     extract_python_module,

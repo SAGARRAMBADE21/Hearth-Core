@@ -7,7 +7,7 @@ import json
 import sys
 from dataclasses import asdict
 
-from services.apidiff.engine import diff_surfaces, extract_surface
+from apidiff.engine import diff_surfaces, extract_surface
 
 
 def main(argv: list[str] | None = None) -> int:

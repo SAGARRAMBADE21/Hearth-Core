@@ -1,6 +1,6 @@
 import unittest
 
-from services.apidiff import (
+from apidiff import (
     ChangeType,
     diff_surfaces,
     extract_openapi,

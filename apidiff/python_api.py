@@ -8,7 +8,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from services.apidiff.model import ApiSurface, ApiSymbol, Param, SymbolKind
+from apidiff.model import ApiSurface, ApiSymbol, Param, SymbolKind
 
 
 def _ann(node: ast.AST | None) -> str | None:

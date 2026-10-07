@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from services.apidiff.model import ApiSurface, ApiSymbol, Param, SymbolKind
+from apidiff.model import ApiSurface, ApiSymbol, Param, SymbolKind
 
 _COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 _DEPRECATED_RE = re.compile(r"/\*\*(?:(?!\*/).)*@deprecated(?:(?!\*/).)*\*/\s*$", re.S)

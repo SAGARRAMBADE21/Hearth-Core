@@ -1,6 +1,7 @@
 """Claude Code adapter tests. No model calls: the SDK's ``query`` is replaced with a fake."""
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,11 +10,12 @@ from unittest import mock
 import claude_agent_sdk as sdk
 
 from services.hearth_agent.adapters.base import HarnessHooks
-from services.hearth_agent.adapters.claude_code import adapter as adapter_mod
+from services.hearth_agent.adapters.claude_code import mcp_config as mcp_config_mod
 from services.hearth_agent.adapters.claude_code.adapter import ClaudeCodeAdapter
 from services.hearth_agent.adapters.claude_code.hooks import build_hooks
 from services.hearth_agent.adapters.claude_code.mcp_tools import JobState, build_domain_tools
 from services.hearth_agent.adapters.claude_code.streaming import parse_message
+from services.hearth_agent.engine import sessions_io
 from services.hearth_agent.engine import stream_events as se
 from services.hearth_agent.policy import ToolPolicy
 from services.hearth_agent.registry.adapter_registry import get_adapter, list_adapters
@@ -112,7 +114,7 @@ class StreamingTests(unittest.TestCase):
 class AdapterStreamTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_run_with_fake_sdk(self):
         captured: dict = {}
-        real_build = adapter_mod.build_domain_tools
+        real_build = mcp_config_mod.build_domain_tools
 
         def capture(*a, **k):
             tools = real_build(*a, **k)
@@ -127,21 +129,32 @@ class AdapterStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("WebFetch", options.disallowed_tools)
             self.assertIn("hearth", options.mcp_servers)
             self.assertEqual(options.env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
-            yield sdk.SystemMessage(subtype="init", data={"session_id": "sess-1"})
+            self.assertIsNone(options.resume)  # a first job starts a fresh session...
+            sid = options.session_id  # ...under the id the adapter pre-allocated, as the CLI does
+            seen["preliminary"] = sessions_io.read_session_row("job_1")
+            yield sdk.SystemMessage(subtype="init", data={"session_id": sid})
             yield sdk.AssistantMessage(content=[sdk.TextBlock(text="Migrating.")], model="m")
             await captured["finish"].handler({"summary": "Swapped charges for paymentIntents."})
             yield sdk.ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
-                                    num_turns=1, session_id="sess-1", total_cost_usd=0.01,
+                                    num_turns=1, session_id=sid, total_cost_usd=0.01,
                                     usage={"input_tokens": 100, "output_tokens": 20})
 
         events: list[dict] = []
-        with mock.patch.object(adapter_mod, "build_domain_tools", capture), \
+        seen: dict = {}
+        with mock.patch.object(mcp_config_mod, "build_domain_tools", capture), \
              mock.patch.object(sdk, "query", fake_query), \
-             tempfile.TemporaryDirectory() as d:
-            result = await ClaudeCodeAdapter({}).run(fixtures.job(), Path(d), _hooks([True]), on_event=events.append)
+             tempfile.TemporaryDirectory() as d, \
+             mock.patch.dict(os.environ, {"HEARTH_STATE_DIR": d}):
+            result = await ClaudeCodeAdapter({}).run(fixtures.job(), Path(d) / "ws", _hooks([True]),
+                                                     on_event=events.append)
+            row = sessions_io.read_session_row("job_1")
 
+        # the index row was written before the CLI started, then rolled up at the end
+        self.assertEqual(seen["preliminary"]["status"], "running")
+        self.assertEqual(seen["preliminary"]["nativeSessionId"], row["nativeSessionId"])
+        self.assertEqual((row["status"], row["usage"]["input_tokens"], row["costUsd"]), ("passed", 100, 0.01))
         self.assertEqual(result.status, "passed")
-        self.assertEqual(result.native_session_id, "sess-1")
+        self.assertEqual(result.native_session_id, row["nativeSessionId"])
         self.assertEqual(result.summary, "Swapped charges for paymentIntents.")
         self.assertEqual((result.usage.input_tokens, result.usage.cost_usd), (100, 0.01))
         self.assertTrue(events[-1]["done"])
