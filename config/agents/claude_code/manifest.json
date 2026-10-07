@@ -1,0 +1,87 @@
+{
+  "name": "claude_code",
+  "binary": "claude",
+  "install_url": "https://docs.claude.com/en/docs/claude-code/setup",
+  "home_dir": "~/.claude",
+  "env_file": "~/.claude/.env",
+  "config_file": "~/.claude/settings.json",
+  "agents_dir": "~/.claude/projects",
+  "workspace_dir": "~/.hearth/workspaces",
+  "provisioning_log": "~/.claude/provisioning.log",
+  "precreate_home_for_skills": false,
+  "cwd": "~",
+  "cli_timeout_seconds": 2700,
+  "api": {
+    "session_header": ""
+  },
+  "model_prefix": "claude_code",
+  "model": {
+    "default": "claude-opus-5-5",
+    "env": "HEARTH_MODEL",
+    "effort": "xhigh"
+  },
+  "mcp": {
+    "format": "sdk",
+    "server_name": "hearth",
+    "tools": ["get_change_record", "get_impact_report", "run_validation", "finish"]
+  },
+  "model_capabilities": {
+    "function_calling": true,
+    "vision": true,
+    "reasoning": true,
+    "json_output": true,
+    "max_context": 1000000,
+    "max_output": 128000
+  },
+  "skills": {
+    "migration": null,
+    "adoption": null
+  },
+  "flags": {
+    "dangerously_skip_permissions": false,
+    "permission_mode": "default",
+    "setting_sources": [],
+    "tools": ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+    "disallowed_tools": ["WebFetch", "WebSearch", "Task"],
+    "output_format": "sdk"
+  },
+  "runtime_setup": {
+    "installs_cli": true,
+    "npm_package": "@anthropic-ai/claude-code",
+    "extra_mounts": [],
+    "session_globs": [
+      "projects/**/*.jsonl"
+    ],
+    "secrets": [
+      {
+        "key": "ANTHROPIC_API_KEY",
+        "label": "Anthropic API key",
+        "description": "Bring-your-own-LLM: the customer's own Anthropic API key."
+      },
+      {
+        "key": "CLAUDE_CODE_OAUTH_TOKEN",
+        "label": "Claude subscription token",
+        "description": "Use a Claude Code OAuth token when running without an interactive login."
+      },
+      {
+        "key": "ANTHROPIC_AUTH_TOKEN",
+        "label": "LLM gateway token",
+        "description": "Used with the space's LLM gateway or another Anthropic-compatible gateway."
+      }
+    ]
+  },
+  "providers": {
+    "anthropic": {
+      "settings_env": {
+        "ANTHROPIC_API_KEY": "{api_key}"
+      }
+    },
+    "llm_gateway": {
+      "settings_env": {
+        "ANTHROPIC_BASE_URL": "{gateway_url}",
+        "ANTHROPIC_AUTH_TOKEN": "{api_key}",
+        "ANTHROPIC_API_KEY": ""
+      }
+    }
+  }
+}
