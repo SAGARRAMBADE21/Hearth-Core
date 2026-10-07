@@ -3,11 +3,13 @@ REST routes for the GitHub connector — PAT method (paste a fine-grained token)
 
   POST /api/connectors/github/token       — receive & validate a PAT, hand it to gh
   GET  /api/connectors/github/status      — current connection status (gh auth status + metadata)
-  POST /api/connectors/github/disconnect  — gh auth logout + delete metadata
+  POST /api/connectors/github/disconnect  — sign gh out of every account, clear git config + metadata
   POST /api/connectors/github/reconnect   — re-validate the token gh holds
 
-Only one GitHub identity is connected per space. The token is never echoed back
-and never written to HEARTH's own files; gh holds it.
+Only one GitHub identity is connected per space; the `gh auth login` device flow
+is the other way to establish it (see github_cli.py). `/status`, `/disconnect` and
+`/reconnect` are method-agnostic and live here. The token is never echoed back and
+never written to HEARTH's own files; gh holds it.
 
 Shape mirrors xo-space ``routers/cowork_agent/connectors/github_pat.py``.
 """
@@ -19,7 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from services.hearth_agent.connectors.github import (
-    delete_github_credential,
+    disconnect_github_account,
     get_github_token,
     get_status,
     save_github_credential,
@@ -51,10 +53,12 @@ async def submit_github_token(body: TokenBody) -> JSONResponse:
     result = await github_pat.connect(token)
     if result["ok"]:
         return JSONResponse(result["payload"])
-    return JSONResponse(
-        {"status": result["status"], "error": result.get("error", "Validation failed.")},
-        status_code=400 if result["status"] == "needs_auth" else 502,
-    )
+    body = {"status": result["status"], "error": result.get("error", "Validation failed.")}
+    # A categorical failure the UI can name without rendering our text.
+    for key in ("code", "missing_scopes"):
+        if key in result:
+            body[key] = result[key]
+    return JSONResponse(body, status_code=400 if result["status"] == "needs_auth" else 502)
 
 
 # ---------------------------------------------------------------------------
@@ -73,9 +77,20 @@ async def github_status() -> JSONResponse:
 
 @router.post("/api/connectors/github/disconnect")
 async def disconnect_github() -> JSONResponse:
-    """Log gh out and clear the stored credential metadata."""
-    await delete_github_credential()
-    return JSONResponse({"status": "needs_auth"})
+    """Clear the connection: sign gh out of every github.com account, and remove the
+    git identity and credential helper connecting set up.
+
+    Answers ``needs_auth`` only once gh holds no account: while it still does, every
+    `gh` call keeps working, and the UI must not show signed out.
+    """
+    if await disconnect_github_account():
+        return JSONResponse({"status": "needs_auth"})
+    return JSONResponse(
+        {"status": "failed",
+         "error": "GitHub CLI is still signed in to github.com. Run `gh auth status` to see "
+                  "which account, then `gh auth logout --hostname github.com --user <login>`."},
+        status_code=502,
+    )
 
 
 # ---------------------------------------------------------------------------

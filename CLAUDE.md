@@ -36,7 +36,11 @@
   tools, `git push/remote/fetch`, `gh`, `sudo` are denied.
 - `finish` is accepted only after `HarnessHooks.validate_candidate()` passes.
 - The GitHub token lives only in gh's store (`gh auth login --with-token`). `token.json` holds metadata.
-  Never write a token into a remote URL, a sandbox, a log, or a JSON file.
+  Never write a token into a remote URL, a sandbox, a log, an error message, or a JSON file. Every gh call
+  runs without `GH_TOKEN`/`GITHUB_TOKEN` (`gh_api.STORE_BYPASS_ENV`), so gh's store is the only credential.
+- One gh account per space: connecting signs gh out of every other github.com account; disconnecting signs
+  it out of all of them and removes the git identity and credential helper connecting wrote
+  (quirq-ai/xo-space#197).
 - Sandboxes receive `RepoMirror.export_tree()` output: no `.git` remote, no credential.
 
 ## Testing

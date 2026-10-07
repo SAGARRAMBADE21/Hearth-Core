@@ -125,6 +125,7 @@ async def run(
     cwd: str | Path | None = None,
     timeout: float | None = None,
     env: dict[str, str] | None = None,
+    unset_env: Sequence[str] = (),
     input: bytes | str | None = None,
     separate_stderr: bool = False,
 ) -> CommandResult:
@@ -134,13 +135,20 @@ async def run(
     cwd:             working directory for the child process.
     timeout:         seconds before the process group is killed. ``None`` = no timeout.
     env:             environment overrides merged onto the parent's.
+    unset_env:       variables removed from the child's environment (after ``env`` is merged).
     input:           written to the child's stdin; without it stdin is /dev/null.
     separate_stderr: keep stderr apart (``result.stderr``) instead of merging it into ``output``.
+
+    Only the redacted argv is ever logged, never the output: some commands print a
+    secret (``gh auth token``), and redaction cannot recognise every token shape
+    (a classic GitHub PAT is 40 bare hex characters).
     """
     argv = [str(a) for a in argv]
     started = time.monotonic()
     log.debug("exec %s", redact_argv(argv))
     full_env = {**os.environ, **(env or {})}
+    for key in unset_env:
+        full_env.pop(key, None)
     full_env.setdefault("GIT_TERMINAL_PROMPT", "0")
     kwargs: dict[str, Any] = {"start_new_session": True} if sys.platform != "win32" else {}
     data = input.encode() if isinstance(input, str) else input

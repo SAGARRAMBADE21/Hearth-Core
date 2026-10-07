@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # hearth-core.sh — run Hearth-Core locally.
 #
-#   ./hearth-core.sh install   create venv/ and install requirements-dev.txt
+#   ./hearth-core.sh install   ./install.sh --dev --no-start (venv + dev deps, no server)
 #   ./hearth-core.sh dev       run the API with auto-reload
 #   ./hearth-core.sh test      run the unittest gate
 #
@@ -14,11 +14,7 @@ PY=venv/bin/python
 
 case "${1:-}" in
   install)
-    python3 -m venv venv 2>/dev/null || python -m venv venv
-    [[ -x venv/bin/python ]] && PY=venv/bin/python || PY=venv/Scripts/python.exe
-    "$PY" -m pip install -q -r requirements-dev.txt
-    [[ -f .env ]] || cp .env.example .env
-    echo "installed; edit .env, then ./hearth-core.sh dev"
+    exec ./install.sh --dev --no-start
     ;;
   dev)
     UVICORN_RELOAD=true exec "$PY" server.py

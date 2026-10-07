@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-./hearth-core.sh install     # venv + requirements-dev.txt + .env from .env.example
+./install.sh --dev --no-start  # uv venv + requirements-dev.txt + .env from .env.example
 ./hearth-core.sh test
 ./hearth-core.sh dev
 ```

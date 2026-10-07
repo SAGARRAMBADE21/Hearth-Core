@@ -4,7 +4,8 @@ Read `CLAUDE.md` first; it is the project memory and applies to every coding age
 
 ## Quick reference
 
-- Run: `./hearth-core.sh install`, then `./hearth-core.sh dev` (or `python server.py`).
+- Install and run: `./install.sh` (add `--dev` for test tools, `--no-start` to only install);
+  `./hearth-core.sh dev` runs with auto-reload.
 - Test: `./hearth-core.sh test` (or `python -m unittest discover -s tests -t .`).
 - Add a route: a module under `routers/hearth_agent/` exposing `router`, listed in
   `routers/hearth_agent/__init__.py` `all_routers`.

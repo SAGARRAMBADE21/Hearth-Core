@@ -18,7 +18,7 @@ from services.hearth_agent.connectors.github import (
     pat,
     render_pr,
 )
-from services.hearth_agent.connectors.github.gh_api import GhResult, _parse_include_output, classify
+from services.hearth_agent.connectors.github.gh_api import GhAccount, GhResult, _parse_include_output, classify
 from services.hearth_agent.models import AgentResult, ValidationCommandResult, ValidationResult
 from tests import fixtures
 from utils.commands import CommandResult
@@ -96,7 +96,9 @@ class CredentialTests(unittest.IsolatedAsyncioTestCase):
                       "expires_at": None, "warnings": []}
         gh = mock.AsyncMock()
         gh.login_with_token.return_value = GhResult(True)
-        with mock.patch.object(pat, "validate_token", mock.AsyncMock(return_value=validation)), \
+        gh.accounts.return_value = [GhAccount("hearth-bot", True, "success")]
+        with mock.patch.object(pat, "gh_available", return_value=True), \
+             mock.patch.object(pat, "validate_token", mock.AsyncMock(return_value=validation)), \
              mock.patch.object(pat, "configure_git_identity", mock.AsyncMock()):
             out = await pat.connect(token, gh=gh)
         self.assertTrue(out["ok"])
@@ -108,7 +110,8 @@ class CredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_connect_rejects_invalid_token_before_gh(self):
         gh = mock.AsyncMock()
         bad = {"valid": False, "status": "needs_auth", "error": "Token is invalid or revoked."}
-        with mock.patch.object(pat, "validate_token", mock.AsyncMock(return_value=bad)):
+        with mock.patch.object(pat, "gh_available", return_value=True), \
+             mock.patch.object(pat, "validate_token", mock.AsyncMock(return_value=bad)):
             out = await pat.connect("ghp_" + "x" * 36, gh=gh)
         self.assertFalse(out["ok"])
         gh.login_with_token.assert_not_called()
@@ -116,6 +119,7 @@ class CredentialTests(unittest.IsolatedAsyncioTestCase):
     async def test_status_marks_unhealthy_when_gh_logged_out(self):
         common.save_github_credential({"username": "hearth-bot"})
         gh = mock.AsyncMock()
+        gh.accounts.return_value = []
         gh.auth_status.return_value = mock.Mock(ok=False, login=None, message="not logged in")
         status = await common.get_status(gh)
         self.assertEqual(status["status"], "needs_auth")

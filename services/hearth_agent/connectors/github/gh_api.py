@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
-from utils.commands import CommandResult, run, safe_arg
+from utils.commands import CommandResult, redact, run, safe_arg
 
 CommitState = Literal["pending", "success", "failure", "error"]
 
@@ -125,6 +125,19 @@ class AuthStatus:
     message: str
 
 
+@dataclass(frozen=True)
+class GhAccount:
+    login: str
+    active: bool
+    state: str  # "success" when gh could use the token, else "error" / "timeout"
+
+
+# With either set, `gh auth login` refuses to run and `gh auth token` echoes the
+# variable instead of the stored token. HEARTH's single credential is gh's store,
+# so every gh call runs without them.
+STORE_BYPASS_ENV = ("GH_TOKEN", "GITHUB_TOKEN")
+
+
 class GhCli:
     def __init__(self, *, host: str = "github.com", binary: str = "gh", env: Mapping[str, str] | None = None):
         self.host = host
@@ -132,39 +145,72 @@ class GhCli:
         self.env = dict(env or {})
 
     async def _gh(self, args: Sequence[str], *, input: str | None = None, timeout: float = 120) -> CommandResult:
-        return await run([self.binary, *args], env={"GH_PROMPT_DISABLED": "1", **self.env}, input=input,
-                         timeout=timeout, separate_stderr=True)
+        return await run([self.binary, *args], env={"GH_PROMPT_DISABLED": "1", **self.env},
+                         unset_env=STORE_BYPASS_ENV, input=input, timeout=timeout, separate_stderr=True)
 
     # -- auth ----------------------------------------------------------------
 
     async def login_with_token(self, token: str) -> GhResult:
-        """``gh auth login --with-token`` (token on stdin) then ``gh auth setup-git`` (TDD §9)."""
+        """``gh auth login --with-token`` (token on stdin, never argv or a file) then ``gh auth setup-git``.
+
+        gh adds an account rather than replacing the last; callers that hold one
+        identity sign the others out afterwards (``common.sign_gh_out_of_other_accounts``).
+        """
         r = await self._gh(["auth", "login", "--hostname", self.host, "--git-protocol", "https", "--with-token"],
-                           input=token.strip() + "\n")
+                           input=token.strip() + "\n", timeout=30)
         if not r.ok:
-            return GhResult(False, kind=classify(r), message=r.stderr.strip())
+            return GhResult(False, kind=classify(r), message=redact(r.stderr.strip() or r.stdout.strip()))
+        return await self.setup_git()
+
+    async def setup_git(self) -> GhResult:
+        """``gh auth setup-git``: make git use gh as its credential helper, so no token ever enters a remote URL."""
         r = await self._gh(["auth", "setup-git", "--hostname", self.host])
         if not r.ok:
-            return GhResult(False, kind=classify(r), message=r.stderr.strip())
+            return GhResult(False, kind=classify(r), message=redact(r.stderr.strip()))
         return GhResult(True)
 
     async def auth_status(self) -> AuthStatus:
-        r = await self._gh(["auth", "status", "--hostname", self.host])
-        text = r.stdout + r.stderr
+        """The human-readable ``gh auth status`` the UI shows (PRD §7 onboarding step 2)."""
+        r = await self._gh(["auth", "status", "--hostname", self.host], timeout=10)
+        text = redact(r.stdout + r.stderr)
         login = None
         for line in text.splitlines():
             if "Logged in to" in line and " account " in line:
                 login = line.split(" account ", 1)[1].split()[0]
         return AuthStatus(r.ok, self.host, login, text.strip())
 
+    async def accounts(self) -> list[GhAccount] | None:
+        """Every account gh holds for this host, or None when gh cannot tell.
+
+        ``gh auth status --json hosts`` exits 0 whatever the accounts' state, so
+        validity is read from each entry's ``state``, not the exit code.
+        """
+        r = await self._gh(["auth", "status", "--hostname", self.host, "--json", "hosts"], timeout=10)
+        if not r.ok:
+            return None
+        try:
+            entries = json.loads(r.stdout)["hosts"].get(self.host) or []
+            return [GhAccount(e["login"], bool(e.get("active")), str(e.get("state", "")))
+                    for e in entries if isinstance(e.get("login"), str) and e["login"]]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+
     async def auth_token(self) -> str | None:
-        """The token gh holds, for a one-off validation call. Never persist or log it."""
-        r = await self._gh(["auth", "token", "--hostname", self.host])
+        """The token gh holds, for a one-off validation call. Never persist or log it.
+
+        On failure nothing gh printed is returned or logged: a ``gh`` killed on a
+        timeout may already have printed the token.
+        """
+        r = await self._gh(["auth", "token", "--hostname", self.host], timeout=10)
         return (r.stdout.strip() or None) if r.ok else None
 
-    async def logout(self) -> GhResult:
-        r = await self._gh(["auth", "logout", "--hostname", self.host])
-        return GhResult(r.ok, kind=None if r.ok else classify(r), message=r.stderr.strip())
+    async def logout(self, user: str | None = None) -> GhResult:
+        """Sign gh out of this host — of one account when ``user`` is given."""
+        argv = ["auth", "logout", "--hostname", self.host]
+        if user:
+            argv += ["--user", safe_arg(user)]
+        r = await self._gh(argv, timeout=10)
+        return GhResult(r.ok, kind=None if r.ok else classify(r), message=redact(r.stderr.strip()))
 
     # -- REST ----------------------------------------------------------------
 

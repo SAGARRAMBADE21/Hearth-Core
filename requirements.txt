@@ -1,22 +1,7 @@
-# Hearth-Core dependencies
-
-# Web framework (the Hearth-Core API inside the space)
 fastapi>=0.141.1
 uvicorn[standard]>=0.27.0
-
-# Data validation: Change Records, Impact Reports, job specs
 pydantic>=2.7
-
-# Environment variables (.env)
 python-dotenv>=1.0.0
-
-# HTTP client: GitHub token validation (GET /user)
 httpx>=0.26.0
-
-# YAML: OpenAPI specs, .hearth.yml, provider manifests
 PyYAML>=6.0
-
-# The Claude Code intelligence: the Claude Agent SDK drives the `claude` CLI.
-# Pinned floor: the adapter relies on hooks, in-process MCP servers, `tools`,
-# `setting_sources` and `effort` as they exist in this line.
 claude-agent-sdk>=0.2.164

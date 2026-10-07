@@ -13,6 +13,7 @@ from services.hearth_agent.adapters.loader import try_load_capability
 
 from .agents import router as agents_router
 from .apidiff import router as apidiff_router
+from .connectors.github_cli import router as github_cli_router
 from .connectors.github_pat import router as github_pat_router
 
 
@@ -28,4 +29,5 @@ all_routers: list[APIRouter] = [
     *_active_agent_routes(),
     apidiff_router,
     github_pat_router,
+    github_cli_router,
 ]

@@ -1,17 +1,24 @@
 """
 GitHub connector — shared core, common to every auth method.
 
-The acquisition method (a pasted fine-grained PAT via ``pat.py``) ends with the
-token handed to the gh CLI. Everything *after* that point lives here:
+Both acquisition methods (a pasted fine-grained PAT via ``pat.py``, and the
+``gh auth login`` device flow via ``cli_auth.py``) end with the token held by the
+gh CLI. Everything *after* that point is identical, and lives here:
 
   - persistence  — provider key "github" in token.json (owned by token_store),
                    holding credential METADATA only: login, auth method, expiry,
                    last check. The token itself lives in gh's store (TDD §6).
   - validation   — GET /user, plus the fine-grained token's expiry header
-  - status       — what the UI shows, including the 14-day expiry warning (PRD §5)
-  - git identity — seed the space's global user.name / user.email for the bot
+  - status       — what the UI shows, including the 14-day expiry warning (PRD §5);
+                   connected exactly when gh's active github.com account works
+  - git identity — seed the space's global user.name / user.email for the bot, and
+                   `gh auth setup-git` for HTTPS credentials; disconnecting removes
+                   both, so the next account starts clean
+  - one identity — gh keeps several accounts per host; connecting signs it out of
+                   the others, disconnecting out of all of them
 
-Shape mirrors xo-space ``connectors/github/common.py``.
+Shape mirrors xo-space ``connectors/github/common.py`` (including quirq-ai/xo-space#197:
+token in gh's store, one gh account, git config cleared on disconnect).
 
 Token file: $HEARTH_STATE_DIR/secrets/token.json  (see connectors/token_store.py)
 """
@@ -31,10 +38,11 @@ from .gh_api import GhCli
 log = logging.getLogger(__name__)
 
 GITHUB_API = "https://api.github.com"
+GITHUB_HOSTNAME = "github.com"
 EXPIRY_WARNING_DAYS = 14
 
 GitHubStatus = Literal["connected", "needs_auth", "failed"]
-AuthMethod = Literal["pat"]
+AuthMethod = Literal["pat", "cli"]
 
 # Classic-PAT scopes HEARTH must never hold (PRD §5: never admin or branch-protection bypass).
 _FORBIDDEN_SCOPES = {"admin:org", "admin:repo_hook", "admin:enterprise", "delete_repo", "site_admin"}
@@ -75,11 +83,66 @@ def save_github_credential(validation: dict[str, Any], *, auth_method: str = "pa
     log.info("GitHub credential metadata saved to %s (method=%s)", token_file(), auth_method)
 
 
-async def delete_github_credential(gh: GhCli | None = None) -> None:
-    """Forget the credential: log gh out and remove the metadata entry."""
-    await (gh or GhCli()).logout()
-    delete_entry("github")
-    log.info("GitHub credential removed")
+# ---------------------------------------------------------------------------
+# gh accounts: one identity per space
+# ---------------------------------------------------------------------------
+
+def gh_available() -> bool:
+    return shutil.which(GH_BIN) is not None
+
+
+async def sign_gh_out(gh: GhCli | None = None) -> None:
+    """Sign gh out of every github.com account it holds. Never raises.
+
+    A bare ``gh auth logout`` covers only one account, and fails outright once gh
+    holds more than one; so each is named.
+    """
+    gh = gh or GhCli()
+    accounts = await gh.accounts()
+    if accounts is None:
+        await gh.logout()  # gh cannot list its accounts: the bare logout, which covers one
+        return
+    for account in accounts:
+        await gh.logout(account.login)
+
+
+async def sign_gh_out_of_other_accounts(gh: GhCli | None = None) -> None:
+    """After a sign-in: sign gh out of every github.com account but the one just made
+    active, since `gh auth login` adds an account rather than replacing the last.
+    The space holds one identity. Never raises."""
+    gh = gh or GhCli()
+    accounts = await gh.accounts()
+    if accounts is None:
+        log.warning("Could not list gh's github.com accounts; an earlier one may still be signed in")
+        return
+    active = next((a.login for a in accounts if a.active), None)
+    if active is None:
+        return  # nothing tells the new one apart, so keep all
+    for account in accounts:
+        if account.login != active:
+            await gh.logout(account.login)
+
+
+async def disconnect_github_account(gh: GhCli | None = None) -> bool:
+    """Sign gh out of every github.com account, remove what connecting wrote to the
+    global gitconfig, and forget the credential metadata. Never raises.
+
+    Returns whether gh is left without a github.com account. Logging out only the
+    active account is not enough: gh makes the next one active, and its token would
+    still answer every `gh` call. Metadata is kept when gh is still signed in, so a
+    failed disconnect leaves the record as it was.
+    """
+    gh = gh or GhCli()
+    await sign_gh_out(gh)
+    await _clear_git_config()
+    remaining = await gh.accounts()
+    signed_out = (await gh.auth_token() is None) if remaining is None else not remaining
+    if signed_out:
+        delete_entry("github")
+        log.info("GitHub disconnected")
+    else:
+        log.warning("gh is still signed in to %s after disconnect", GITHUB_HOSTNAME)
+    return signed_out
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +154,8 @@ def _token_kind(token: str) -> str:
         return "fine_grained"
     if token.startswith("ghp_"):
         return "classic"
+    if token.startswith("gho_"):
+        return "oauth"  # from the `gh auth login` device flow
     return "other"
 
 
@@ -149,7 +214,7 @@ async def validate_token(token: str) -> dict[str, Any]:
     if granted & _FORBIDDEN_SCOPES:
         return {"valid": False, "status": "failed",
                 "error": f"Token has admin scopes HEARTH must not hold: {', '.join(sorted(granted & _FORBIDDEN_SCOPES))}."}
-    if kind != "fine_grained":
+    if kind in ("classic", "other"):
         warnings.append("Use a fine-grained token limited to the repositories HEARTH should maintain.")
     return {
         "valid": True,
@@ -188,21 +253,33 @@ async def get_status(gh: GhCli | None = None) -> dict[str, Any]:
     Compute the current GitHub connector status from gh (the source of truth for the
     token) plus the stored metadata. Shape: ``status``, ``username``, ``auth_method``,
     ``expires_at``, ``warning``, and ``gh_status`` (the ``gh auth status`` text the UI shows).
+
+    Connected exactly when gh's active github.com account works, whether HEARTH or a
+    terminal signed it in. ``auth_method`` / ``expires_at`` come from the metadata only
+    when it describes that same account; a terminal sign-in reports them as None.
     """
     gh = gh or GhCli()
     meta = get_github_credential() or {}
+    accounts = await gh.accounts()
     auth = await gh.auth_status()
-    if not auth.ok:
+    if accounts is None:  # gh cannot list accounts: fall back to the plain status
+        ok, login = auth.ok, auth.login
+    else:
+        active = next((a for a in accounts if a.active), None)
+        ok = active is not None and active.state == "success"
+        login = active.login if active else None
+    if not ok:
         if meta:
             meta["healthy"] = False
             meta["checked_at"] = datetime.now(UTC).isoformat()
             set_entry("github", meta)
         return {"status": "needs_auth", "gh_status": auth.message}
+    ours = bool(meta) and meta.get("login") == login
     result: dict[str, Any] = {
         "status": "connected",
-        "username": auth.login or meta.get("login", ""),
-        "auth_method": meta.get("auth_method", "pat"),
-        "expires_at": meta.get("expires_at"),
+        "username": login or "",
+        "auth_method": meta.get("auth_method") if ours else None,
+        "expires_at": meta.get("expires_at") if ours else None,
         "gh_status": auth.message,
     }
     warning = expiry_warning(meta.get("expires_at"))
@@ -265,6 +342,32 @@ async def configure_git_identity(validation: dict[str, Any]) -> None:
         rc, out = await _run(GIT_BIN, "config", "--global", key, value)
         if rc != 0:
             log.warning("Could not set git %s: %s", key, out)
+
+
+# What connecting writes to the global gitconfig: the identity above, and the
+# credential helpers `gh auth setup-git` points at gh.
+_GIT_KEYS_SET_ON_CONNECT = (
+    "user.name",
+    "user.email",
+    f"credential.https://{GITHUB_HOSTNAME}.helper",
+    "credential.https://gist.github.com.helper",
+)
+
+
+async def _clear_git_config() -> None:
+    """Remove what connecting wrote to the global gitconfig. Never raises.
+
+    The identity goes even when set by hand: otherwise connecting a different
+    account keeps the previous name and email, and the bot's commits are credited
+    to the wrong account. The next account to connect seeds its own. Other
+    settings stay, and git drops a section once its last key is gone.
+    """
+    if shutil.which(GIT_BIN) is None:
+        return
+    for key in _GIT_KEYS_SET_ON_CONNECT:
+        rc, out = await _run(GIT_BIN, "config", "--global", "--unset-all", key)
+        if rc not in (0, 5):  # 5: the key was not set
+            log.warning("Could not remove git %s: %s", key, out)
 
 
 def connection_payload(validation: dict[str, Any], auth_method: str) -> dict[str, Any]:

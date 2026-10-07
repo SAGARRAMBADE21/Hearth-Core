@@ -1,5 +1,7 @@
+import os
 import sys
 import unittest
+from unittest import mock
 
 from utils.commands import CommandSpecError, redact, redact_argv, run, safe_arg
 
@@ -33,6 +35,12 @@ class RunTests(unittest.IsolatedAsyncioTestCase):
     async def test_input_reaches_stdin(self):
         r = await run([sys.executable, "-c", "import sys; print(sys.stdin.read().upper())"], input="hello")
         self.assertEqual(r.output.strip(), "HELLO")
+
+    async def test_unset_env_removes_variables_from_the_child(self):
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "from-env", "KEEP_ME": "yes"}):
+            r = await run([sys.executable, "-c", "import os; print(os.environ.get('GH_TOKEN'), os.environ.get('KEEP_ME'))"],
+                          unset_env=("GH_TOKEN",))
+        self.assertEqual(r.output.strip(), "None yes")
 
     async def test_missing_binary(self):
         r = await run(["definitely-not-a-real-binary-xyz"])
